@@ -1,7 +1,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
-#include "./hazard_ptr.hpp"
+#include <lock_free/hazptr/domain.hpp>
 
 namespace lock_free {
     // Implementation of Michael and Scott non-blocking queue
@@ -34,7 +34,7 @@ namespace lock_free {
         using node_alloc_traits = std::allocator_traits<node_allocator_type>;
         using node_pointer = node_alloc_traits::pointer;
         using atomic_node_pointer = std::atomic<node_pointer>;
-        using hazard_domain = hazard_domain<node_type, MaxThreads, 2>;
+        using hazard_domain = hazptr::domain<node_type, MaxThreads, 2>;
 
     private:
         using hazard = hazard_domain;
@@ -52,7 +52,7 @@ namespace lock_free {
         inline void push(node_pointer node) {
             node_pointer tail;
             while (true) {
-                tail = hazard::use0(_tail);
+                tail = hazard::acquire0(_tail);
                 node_pointer next = tail->next.load();
                 if (tail == _tail.load()) { // if tail has not changed
                     if (next == nullptr) { // if tail points to the last node
@@ -101,9 +101,9 @@ namespace lock_free {
             value_type value;
             node_pointer head;
             while (true) {
-                head = hazard::use0(_head);
+                head = hazard::acquire0(_head);
                 node_pointer tail = _tail.load();
-                node_pointer next = hazard::use1(head->next);
+                node_pointer next = hazard::acquire1(head->next);
                 if (head == _head.load()) { // if head, tail and next are consistent
                     if (head == tail) { // if queue empty or tail falling behind
                         if (next == nullptr) {
@@ -159,6 +159,7 @@ namespace lock_free {
         inline bool is_lock_free() { return atomic_node_pointer{}.is_lock_free(); }
 
         inline static constexpr bool is_always_lock_free = atomic_node_pointer::is_always_lock_free;
+        static_assert(is_always_lock_free, "hazard_queue not lock free");
 
         constexpr inline allocator_type get_allocator() const {
             return allocator_type(_allocator);

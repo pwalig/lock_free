@@ -1,12 +1,14 @@
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <atomic>
 #include <array>
 #include <list>
 #include <cassert>
+#include <lock_free/hazptr/guarded_ptr.hpp>
 
-namespace lock_free {
+namespace lock_free::hazptr {
     // Hazard pointer (https://en.wikipedia.org/wiki/Hazard_pointer) implementation.
     // Based on: https://www.modernescpp.com/index.php/a-lock-free-stack-a-hazard-pointer-implementation/,
     // but with actually lock free memory releasing algorithm
@@ -17,7 +19,13 @@ namespace lock_free {
         size_t SlotsPerThread = 1,
         size_t HardwareDestructiveInterferenceSize = 64
     >
-    class hazard_domain {
+    struct domain {
+        using value_type = T;
+        using pointer = value_type*;
+        using const_pointer = const value_type*;
+        using atomic_pointer = std::atomic<pointer>;
+
+    private:
         struct alignas(HardwareDestructiveInterferenceSize) thread_data {
             std::atomic<std::thread::id> thread_id;
             std::array<std::atomic<T*>, SlotsPerThread> slots;
@@ -41,10 +49,7 @@ namespace lock_free {
                 if (_data == nullptr) throw std::runtime_error("No hazard pointers available!");
             }
 
-            inline thread_data* data() { return _data; }
-            inline const thread_data* data() const { return _data; }
             inline thread_data& value() { return *_data; }
-            inline const thread_data& value() const { return *_data; }
 
             ~thread_data_owner() {
                 _data->thread_id.store(std::thread::id());
@@ -56,7 +61,10 @@ namespace lock_free {
             return owner.value();
         }
 
-        inline static void do_free(const auto& deleter, std::list<T*>& to_free) {
+        inline static void do_free(
+            std::list<T*>& to_free,
+            const auto& deleter = std::default_delete<T>()
+        ) {
             auto it = to_free.begin();
             while (it != to_free.end()) {
                 bool used = false;
@@ -111,6 +119,21 @@ namespace lock_free {
         inline static T* use3(const std::atomic<T*>& aptr) { return use<3>(aptr); }
         inline static T* use4(const std::atomic<T*>& aptr) { return use<4>(aptr); }
 
+        // same as `use`
+        template <size_t Slot = 0>
+        inline static T* acquire(const std::atomic<T*>& aptr) {
+            return use<Slot>(aptr);
+        }
+        // same as `use`
+        inline static T* acquire(const std::atomic<T*>& aptr, size_t slot = 0) {
+            return use(aptr, slot);
+        }
+        inline static T* acquire0(const std::atomic<T*>& aptr) { return acquire<0>(aptr); }
+        inline static T* acquire1(const std::atomic<T*>& aptr) { return acquire<1>(aptr); }
+        inline static T* acquire2(const std::atomic<T*>& aptr) { return acquire<2>(aptr); }
+        inline static T* acquire3(const std::atomic<T*>& aptr) { return acquire<3>(aptr); }
+        inline static T* acquire4(const std::atomic<T*>& aptr) { return acquire<4>(aptr); }
+
         // Marks pointer previously marked as used by `use` as unused,
         // which allows it to be freed.
         inline static void release(size_t slot = 0) {
@@ -141,95 +164,24 @@ namespace lock_free {
 
         // Frees unused (see `use`) pointers marked on this_thread by
         // `retire(T*)` as "to be freed".
-        inline static void free(const auto& deleter) {
+        inline static void free(const auto& deleter = std::default_delete<T>()) {
             thread_data& data = get_thread_data();
-            do_free(deleter, data.to_free);
+            do_free(data.to_free, deleter);
         }
 
         // Same as `free(const auto&)`, but frees pointers marked by all threads.
         // Assumes single threaded access
         // (no other thread is performing `free` or `retire` operations).
-        inline static void free_all(const auto& deleter) {
+        inline static void free_all(const auto& deleter = std::default_delete<T>()) {
             for (auto& slot : thread_slots) {
                 // assert(slot.thread_id.load(std::memory_order::relaxed) != std::thread::id());
-                do_free(deleter, slot.to_free);
+                do_free(slot.to_free, deleter);
             }
         }
-        
-        // Smart pointer that prevents assigned pointer from being freed by other threads.
-        // Uses hazard pointer mechanism (https://en.wikipedia.org/wiki/Hazard_pointer).
-        // Wraps `hazard_domain` 's `use`, `release` and `retire` static methods.
+
         template <size_t Slot = 0>
-        struct ptr {
-            using element_type = T;
-            using pointer = T*;
-        private:
-            using domain = hazard_domain;
-            T* _ptr;
-        public:
-            constexpr ptr() noexcept : _ptr(nullptr) {}
+        using ptr = guarded_ptr<domain, Slot>;
 
-            explicit ptr(const std::atomic<T*>& Ptr) :
-                _ptr(domain::use<Slot>(Ptr)) {}
-
-            ptr(const ptr&) = delete;
-
-            ptr(ptr&& other) noexcept : _ptr(other._ptr) {
-                other._ptr = nullptr;
-            };
-
-            ptr& operator=(const ptr&) = delete;
-            ptr& operator=(ptr&& other) noexcept {
-                if (this != &other) {
-                    _ptr = other._ptr;
-                    other._ptr = nullptr;
-                }
-            }
-
-            ptr& operator=(const std::atomic<T*>& Ptr) {
-                _ptr = domain::use<Slot>(Ptr);
-            }
-
-            ~ptr() {
-                if (_ptr != nullptr) {
-                    domain::release<Slot>();
-                    _ptr = nullptr;
-                }
-            }
-
-            T* operator->() { return _ptr; }
-            const T* operator->() const { return _ptr; }
-            T& operator*() { return *_ptr; }
-            const T& operator*() const { return *_ptr; }
-            T* get() { return _ptr; }
-            const T* get() const { return _ptr; }
-            explicit operator bool() const noexcept {
-                return _ptr != nullptr;
-            }
-
-            template <size_t Slot2>
-            inline friend bool operator==(const ptr& lhs, const ptr<Slot2>& rhs) {
-                return lhs.get() == rhs.get();
-            }
-
-            // releases held pointer
-            void release() {
-                domain::release<Slot>();
-                _ptr = nullptr;
-            }
-            
-            // replaces held pointer
-            void reset(const std::atomic<T*>& Ptr) {
-                _ptr = domain::use<Slot>(Ptr);
-            }
-
-            // releases and retires held pointer
-            void retire() {
-                domain::release<Slot>();
-                domain::retire(_ptr);
-                _ptr = nullptr;
-            }
-        };
         using ptr0 = ptr<0>;
         using ptr1 = ptr<1>;
         using ptr2 = ptr<2>;
@@ -237,18 +189,6 @@ namespace lock_free {
         using ptr4 = ptr<4>;
     };
 
-    template <typename T>
-    inline constexpr bool is_hazard_domain = false;
-
     template <typename T, size_t MaxThreads, size_t SlotsPerThread>
-    inline constexpr bool is_hazard_domain<hazard_domain<T, MaxThreads, SlotsPerThread>> = true;
-
-    template <typename T>
-    concept HazardDomain = is_hazard_domain<T>;
-
-    // Smart pointer that prevents assigned pointer from being freed by other threads.
-    // Uses hazard pointer mechanism (https://en.wikipedia.org/wiki/Hazard_pointer).
-    // Wraps `hazard_domain` 's `use`, `release` and `retire` static methods.
-    template <HazardDomain Domain, size_t Slot = 0>
-    using hazard_ptr = Domain::template ptr<Slot>;
+    inline constexpr bool is_domain<domain<T, MaxThreads, SlotsPerThread>> = true;
 }

@@ -6,8 +6,6 @@ add_executable(tests tests.cpp)
 
 set_target_properties(tests PROPERTIES CXX_STANDARD 20)
 
-# set_property(TARGET nb-queue PROPERTY CXX_STANDARD 20)
-
 target_include_directories(tests PRIVATE include)
 
 if(MSVC)
