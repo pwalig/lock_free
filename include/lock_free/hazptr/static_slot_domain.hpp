@@ -6,7 +6,7 @@
 #include <array>
 #include <list>
 #include <cassert>
-#include <lock_free/hazptr/guarded_ptr.hpp>
+#include <lock_free/hazptr/domain_traits.hpp>
 
 namespace lock_free::hazptr {
     // Hazard pointer (https://en.wikipedia.org/wiki/Hazard_pointer) implementation.
@@ -19,13 +19,15 @@ namespace lock_free::hazptr {
         size_t SlotsPerThread = 1,
         size_t HardwareDestructiveInterferenceSize = 64
     >
-    struct domain {
+    struct static_slot_domain {
         using value_type = T;
         using pointer = value_type*;
         using const_pointer = const value_type*;
         using atomic_pointer = std::atomic<pointer>;
 
     private:
+        size_t _slot;
+
         struct alignas(HardwareDestructiveInterferenceSize) thread_data {
             std::atomic<std::thread::id> thread_id;
             std::array<std::atomic<T*>, SlotsPerThread> slots;
@@ -179,16 +181,17 @@ namespace lock_free::hazptr {
             }
         }
 
-        template <size_t Slot = 0>
-        using ptr = guarded_ptr<domain, Slot>;
-
-        using ptr0 = ptr<0>;
-        using ptr1 = ptr<1>;
-        using ptr2 = ptr<2>;
-        using ptr3 = ptr<3>;
-        using ptr4 = ptr<4>;
+        pointer protect(const atomic_pointer& Ptr) {
+            return use(Ptr, _slot);
+        }
+        void release(pointer) {
+            release(_slot);
+        }
+        void retire(pointer Ptr, [[maybe_unused]]const auto& deleter = std::default_delete<T>()) {
+            retire(Ptr);
+        }
     };
 
     template <typename T, size_t MaxThreads, size_t SlotsPerThread>
-    inline constexpr bool is_domain<domain<T, MaxThreads, SlotsPerThread>> = true;
+    inline constexpr bool is_domain<static_slot_domain<T, MaxThreads, SlotsPerThread>> = true;
 }

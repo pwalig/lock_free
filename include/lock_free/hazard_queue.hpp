@@ -1,7 +1,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
-#include <lock_free/hazptr/domain.hpp>
+#include <lock_free/hazptr/static_slot_domain.hpp>
 
 namespace lock_free {
     // Implementation of Michael and Scott non-blocking queue
@@ -34,12 +34,10 @@ namespace lock_free {
         using node_alloc_traits = std::allocator_traits<node_allocator_type>;
         using node_pointer = node_alloc_traits::pointer;
         using atomic_node_pointer = std::atomic<node_pointer>;
-        using hazard_domain = hazptr::domain<node_type, MaxThreads, 2>;
+        using hazard_domain = hazptr::static_slot_domain<node_type, MaxThreads, 3>;
 
     private:
         using hazard = hazard_domain;
-        using hazard_ptr0 = hazard::ptr0;
-        using hazard_ptr1 = hazard::ptr1;
 
         atomic_node_pointer _head;
         atomic_node_pointer _tail;
@@ -53,7 +51,7 @@ namespace lock_free {
             node_pointer tail;
             while (true) {
                 tail = hazard::acquire0(_tail);
-                node_pointer next = tail->next.load();
+                node_pointer next = hazard::acquire1(tail->next);
                 if (tail == _tail.load()) { // if tail has not changed
                     if (next == nullptr) { // if tail points to the last node
                         // try to append node at the end of the queue
@@ -64,6 +62,7 @@ namespace lock_free {
                         _tail.compare_exchange_strong(tail, next);
                     }
                 }
+                hazard::release1();
             }
             // try to move tail to inserted node
             _tail.compare_exchange_strong(tail, node);
@@ -102,25 +101,27 @@ namespace lock_free {
             node_pointer head;
             while (true) {
                 head = hazard::acquire0(_head);
-                node_pointer tail = _tail.load();
-                node_pointer next = hazard::acquire1(head->next);
+                node_pointer tail = hazard::acquire1(_tail);
+                node_pointer next = hazard::acquire2(head->next);
                 if (head == _head.load()) { // if head, tail and next are consistent
                     if (head == tail) { // if queue empty or tail falling behind
                         if (next == nullptr) {
-                            hazard::release0(); // 'next' releases in destructor
+                            hazard::release0();
                             hazard::release1();
+                            hazard::release2();
                             return std::nullopt; // queue empty
                         }
                         else _tail.compare_exchange_strong(tail, next); // tail falling behind
                     }
                     else {
                         value = next->value; // read value
-                        hazard::release1();
 
                         // try update head to next node
                         if (_head.compare_exchange_strong(head, next)) break;
                     }
                 }
+                hazard::release1();
+                hazard::release2();
             }
             node_alloc_traits::destroy(_allocator, head);
             hazard::release0();
