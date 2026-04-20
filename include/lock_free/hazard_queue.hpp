@@ -152,9 +152,9 @@ namespace lock_free {
             node_pointer node = _head.load(std::memory_order::relaxed);
             while (node) {
                 node_pointer tmp = node;
+                node = node->next.load(std::memory_order::relaxed);
                 node_alloc_traits::destroy(_allocator, tmp);
                 node_alloc_traits::deallocate(_allocator, tmp, 1);
-                node = node->next.load(std::memory_order::relaxed);
             }
         }
 

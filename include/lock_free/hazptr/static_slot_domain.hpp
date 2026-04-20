@@ -36,6 +36,7 @@ namespace lock_free::hazptr {
         };
         using shared_thread_local = shared_thread_local<thread_data, MaxThreads>;
 
+        template <bool including_inactive = false>
         inline static void do_free(
             std::list<T*>& to_free,
             const auto& deleter = std::default_delete<T>()
@@ -44,7 +45,7 @@ namespace lock_free::hazptr {
             while (it != to_free.end()) {
                 bool used = false;
                 for (auto& thd : shared_thread_local::thread_slots) {
-                    if (thd.thread_id.load() != std::thread::id()) {
+                    if ((thd.thread_id.load() != std::thread::id()) || including_inactive) {
                         for (auto& slot : thd->slots) {
                             if (slot.load() == *it)  {
                                 used = true;
@@ -150,7 +151,7 @@ namespace lock_free::hazptr {
         inline static void free_all(const auto& deleter = std::default_delete<T>()) {
             for (auto& slot : shared_thread_local::thread_slots) {
                 // assert(slot.thread_id.load(std::memory_order::relaxed) != std::thread::id());
-                do_free(slot->to_free, deleter);
+                do_free<true>(slot->to_free, deleter);
             }
         }
 
