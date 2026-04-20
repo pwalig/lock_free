@@ -13,3 +13,5 @@ if(MSVC)
 else()
     target_compile_options(tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
+
+target_link_libraries(tests PUBLIC atomic)

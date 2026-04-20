@@ -1,3 +1,4 @@
+#pragma once
 #include <atomic>
 namespace lock_free::hazptr {
     template <typename T>

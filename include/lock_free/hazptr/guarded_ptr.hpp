@@ -1,3 +1,4 @@
+#pragma once
 #include <cassert>
 #include <lock_free/hazptr/domain_traits.hpp>
 
