@@ -34,9 +34,8 @@ namespace lock_free::hazptr {
             std::list<T*> to_free;
             thread_data() : slots(), to_free() { }
         };
-        using shared_thread_local = shared_thread_local<thread_data, MaxThreads>;
+        using _shared_thread_local = shared_thread_local<thread_data, MaxThreads>;
 
-        template <bool including_inactive = false>
         inline static void do_free(
             std::list<T*>& to_free,
             const auto& deleter = std::default_delete<T>()
@@ -44,21 +43,18 @@ namespace lock_free::hazptr {
             auto it = to_free.begin();
             while (it != to_free.end()) {
                 bool used = false;
-                for (auto& thd : shared_thread_local::thread_slots) {
-                    if ((thd.thread_id.load() != std::thread::id()) || including_inactive) {
-                        for (auto& slot : thd->slots) {
-                            if (slot.load() == *it)  {
-                                used = true;
-                                break;
-                            }
-                        }
+                for (auto& thd : _shared_thread_local::thread_slots) {
+                    if (thd.thread_id.load() != std::thread::id()) continue;
+                    for (auto& slot : thd->slots) {
+                        if (slot.load() == *it) used = true;
                         if (used) break;
                     }
+                    if (used) break;
                 }
                 if (!used) {
                     deleter(*it);
                     it = to_free.erase(it);
-                }
+                } else ++it;
             }
         }
 
@@ -73,7 +69,7 @@ namespace lock_free::hazptr {
         // which prevents it from being freed until `release` on same slot is called.
         inline static T* use(const std::atomic<T*>& aptr, size_t slot) {
             assert(slot < SlotsPerThread);
-            thread_data& data = shared_thread_local();
+            thread_data& data = _shared_thread_local();
             T* ptr;
             do {
                 ptr = aptr.load();
@@ -114,7 +110,7 @@ namespace lock_free::hazptr {
         // which allows it to be freed.
         inline static void release(size_t slot = 0) {
             assert(slot < SlotsPerThread);
-            thread_data& data = shared_thread_local();
+            thread_data& data = _shared_thread_local();
             data.slots[slot].store(nullptr);
         }
 
@@ -134,14 +130,14 @@ namespace lock_free::hazptr {
 
         // Marks pointer as "to be freed".
         inline static void retire(T* ptr) {
-            thread_data& data = shared_thread_local();
+            thread_data& data = _shared_thread_local();
             data.to_free.push_back(ptr);
         }
 
         // Frees unused (see `use`) pointers marked on this_thread by
         // `retire(T*)` as "to be freed".
         inline static void free(const auto& deleter = std::default_delete<T>()) {
-            thread_data& data = shared_thread_local();
+            thread_data& data = _shared_thread_local();
             do_free(data.to_free, deleter);
         }
 
@@ -149,10 +145,8 @@ namespace lock_free::hazptr {
         // Assumes single threaded access
         // (no other thread is performing `free` or `retire` operations).
         inline static void free_all(const auto& deleter = std::default_delete<T>()) {
-            for (auto& slot : shared_thread_local::thread_slots) {
-                // assert(slot.thread_id.load(std::memory_order::relaxed) != std::thread::id());
-                do_free<true>(slot->to_free, deleter);
-            }
+            for (auto& slot : _shared_thread_local::thread_slots)
+                do_free(slot->to_free, deleter);
         }
 
         pointer protect(const atomic_pointer& Ptr) {
